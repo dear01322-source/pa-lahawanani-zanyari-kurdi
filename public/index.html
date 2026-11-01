@@ -233,15 +233,62 @@ $("copyBtn").onclick=async()=>{
  }
 };
 
-$("startBtn").onclick=()=>{
- if(currentGame==="quiz"){
-  startQuiz();
- }else if(currentGame==="billiards"){
-  $("gameArea").innerHTML="<h2>🎱 بیلیارد</h2><p>بەشی یاری بیلیارد هێشتا پێویستی بە کۆدی تایبەتی سێرڤەر و یارییەکەی هەیە.</p>";
- }else{
-  $("gameArea").innerHTML="<h2>🃏 کۆنکانی کوردی</h2><p>بەشی کۆنکانی هێشتا پێویستی بە کۆدی تایبەتی کارت و نۆرەکانی یاری هەیە.</p>";
- }
-};
+socket.on("school-question",data=>{
+ const area=$("gameArea");
+ area.innerHTML="";
+
+ const title=document.createElement("h2");
+ title.textContent="🏫 پرسیاری قوتابخانە "+data.number+" / "+data.total;
+ area.appendChild(title);
+
+ const question=document.createElement("div");
+ question.className="question";
+ question.textContent=data.question;
+ area.appendChild(question);
+
+ data.answers.forEach((answer,index)=>{
+  const btn=document.createElement("button");
+  btn.className="answer";
+  btn.textContent=answer;
+  btn.onclick=()=>{
+   area.querySelectorAll("button").forEach(b=>b.disabled=true);
+   socket.emit("school-answer",index);
+  };
+  area.appendChild(btn);
+ });
+});
+
+socket.on("school-answer-result",data=>{
+ const result=document.createElement("h3");
+ result.textContent=data.correct
+  ? "✅ وەڵامی ڕاست! +١ خاڵ"
+  : "❌ وەڵامی هەڵە! وەڵامی ڕاست: "+data.rightAnswer;
+ $("gameArea").appendChild(result);
+});
+
+socket.on("school-scores",scores=>{
+ $("playerCount").textContent="🏆 خاڵەکان: "+
+ Object.values(scores).reduce((a,b)=>a+b,0);
+});
+
+socket.on("school-finished",results=>{
+ const area=$("gameArea");
+ area.innerHTML="<h2>🏆 یاری قوتابخانە تەواو بوو!</h2>";
+
+ results.forEach((p,i)=>{
+  const item=document.createElement("h3");
+  item.textContent=(i+1)+". "+p.name+
+   " — "+p.score+" خاڵ — پلە "+p.level;
+  area.appendChild(item);
+ });
+
+ const winner=document.createElement("h2");
+ winner.textContent=results.length
+  ? "👑 پاڵەوان: "+results[0].name
+  : "یاری تەواو بوو";
+ area.appendChild(winner);
+});
+
 
 function startQuiz(){
  questions=[...questionBank].sort(()=>Math.random()-.5);
