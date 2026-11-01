@@ -1,0 +1,251 @@
+
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const crypto = require("crypto");
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
+
+app.use(express.json());
+app.use(express.static("public"));
+
+const rooms = new Map();
+const levels = new Map();
+
+const games = ["quiz", "billiards", "konkani", "school"];
+
+const schoolQuestions = [
+  {q:"٢ + ٨ دەکاتە چەند؟",a:["١٠","١٢","٨"],c:0},
+  {q:"پایتەختی عێراق چییە؟",a:["هەولێر","بەغدا","بەسرە"],c:1},
+  {q:"خۆر لە کوێ هەڵدێت؟",a:["ڕۆژهەڵات","ڕۆژئاوا","باشوور"],c:0},
+  {q:"چەند ڕۆژ لە هەفتەدا هەیە؟",a:["٥","٧","٨"],c:1},
+  {q:"١٠ × ٥ دەکاتە چەند؟",a:["٤٠","٥٠","٦٠"],c:1},
+  {q:"کامەیان هەڵمژینی هەوا دەکات؟",a:["دار","بەرد","ئاسن"],c:0},
+  {q:"زمانی کوردی لە کام گرووپە؟",a:["هندوئەورووپی","چینی","لاتینی"],c:0},
+  {q:"ئاو لە چەند پلەدا دەبێتە بەفر؟",a:["٠","٥٠","١٠٠"],c:0},
+  {q:"٣ × ٧ دەکاتە چەند؟",a:["١٨","٢١","٢٤"],c:1},
+  {q:"زەوی چەند مانگی هەیە؟",a:["١٠","١٢","١٤"],c:1}
+];
+
+app.get("/", (req, res) => {
+  res.send("پاڵەوانانی زانیاری کوردی 🎮");
+});
+
+app.get("/health", (req, res) => {
+  res.json({status:"online"});
+});
+
+function getLevel(name) {
+  return levels.get(name) || 1;
+}
+
+function addLevel(name) {
+  const level = Math.min(100, getLevel(name) + 1);
+  levels.set(name, level);
+  return level;
+}
+
+io.on("connection", socket => {
+
+  socket.on("create-room", ({game, maxPlayers=2, name}) => {
+    if (!games.includes(game))
+      return socket.emit("error-message","جۆری یاری هەڵەیە");
+
+    if (![2,3,4].includes(maxPlayers))
+      return socket.emit("error-message","ژمارەی یاریزان هەڵەیە");
+
+    const roomId = crypto.randomBytes(3).toString("hex");
+
+    const room = {
+      id: roomId,
+      game,
+      maxPlayers,
+      host: socket.id,
+      players: [],
+      scores: {},
+      school: null
+    };
+
+    rooms.set(roomId,room);
+    joinRoom(socket,room,name || "یاریزان");
+  });
+
+  socket.on("join-room", ({roomId,name}) => {
+    const room = rooms.get(roomId);
+
+    if (!room)
+      return socket.emit("error-message","ژوورەکە نەدۆزرایەوە");
+
+    if (room.players.length >= room.maxPlayers)
+      return socket.emit("error-message","ژوورەکە پڕە");
+
+    if (room.school && room.school.started)
+      return socket.emit("error-message","یاری دەستی پێکردووە");
+
+    joinRoom(socket,room,name || "یاریزان");
+  });
+
+  socket.on("start-school", () => {
+    const room = findRoom(socket.id);
+    if (!room || room.game !== "school") return;
+
+    if (room.host !== socket.id)
+      return socket.emit("error-message","تەنها دروستکەری ژوور دەتوانێت یاری دەست پێ بکات");
+
+    if (room.players.length < 2)
+      return socket.emit("error-message","بۆ یاری قوتابخانە لانیکەم دوو قوتابی پێویستن");
+
+    if (room.school && room.school.started) return;
+
+    room.school = {
+      started:true,
+      index:0,
+      questions:[...schoolQuestions].sort(() => Math.random()-.5),
+      answers:{}
+    };
+
+    room.players.forEach(p => room.scores[p.id] = 0);
+    sendSchoolQuestion(room);
+  });
+
+  socket.on("school-answer", answerIndex => {
+    const room = findRoom(socket.id);
+    if (!room || !room.school || !room.school.started) return;
+
+    const game = room.school;
+    if (game.answers[socket.id] !== undefined) return;
+
+    if (!Number.isInteger(answerIndex) ||
+        answerIndex < 0 || answerIndex > 2) return;
+
+    const q = game.questions[game.index];
+    if (!q) return;
+
+    const correct = answerIndex === q.c;
+    game.answers[socket.id] = true;
+
+    if (correct) {
+      room.scores[socket.id]++;
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) addLevel(player.name);
+    }
+
+    socket.emit("school-answer-result", {
+      correct,
+      rightAnswer:q.a[q.c]
+    });
+
+    io.to(room.id).emit("school-scores", room.scores);
+
+    if (room.players.every(p => game.answers[p.id] !== undefined)) {
+      nextSchoolQuestion(room);
+    }
+  });
+
+  socket.on("chat", message => {
+    const room = findRoom(socket.id);
+    if (!room || typeof message !== "string") return;
+
+    io.to(room.id).emit("chat", {
+      player:socket.id,
+      message:message.slice(0,300)
+    });
+  });
+
+  socket.on("answer", ({correct}) => {
+    const room = findRoom(socket.id);
+    if (!room || room.game !== "quiz") return;
+
+    if (correct === true) {
+      room.scores[socket.id] =
+        (room.scores[socket.id] || 0) + 1;
+      io.to(room.id).emit("score",room.scores);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    for (const [id,room] of rooms) {
+      room.players = room.players.filter(p => p.id !== socket.id);
+      delete room.scores[socket.id];
+
+      if (room.players.length === 0) {
+        rooms.delete(id);
+      } else {
+        if (room.school && room.school.started &&
+            room.players.every(p => room.school.answers[p.id] !== undefined)) {
+          nextSchoolQuestion(room);
+        }
+        io.to(id).emit("players-update",room.players);
+      }
+    }
+  });
+});
+
+function sendSchoolQuestion(room) {
+  const game = room.school;
+  if (!game || !game.started) return;
+
+  if (game.index >= game.questions.length) {
+    game.started = false;
+
+    const results = room.players.map(p => ({
+      name:p.name,
+      score:room.scores[p.id] || 0,
+      level:getLevel(p.name)
+    })).sort((a,b) => b.score-a.score);
+
+    io.to(room.id).emit("school-finished",results);
+    return;
+  }
+
+  game.answers = {};
+  const q = game.questions[game.index];
+
+  io.to(room.id).emit("school-question",{
+    number:game.index+1,
+    total:game.questions.length,
+    question:q.q,
+    answers:q.a
+  });
+}
+
+function nextSchoolQuestion(room) {
+  if (!room.school || !room.school.started) return;
+  room.school.index++;
+  setTimeout(() => sendSchoolQuestion(room),2000);
+}
+
+function joinRoom(socket,room,name) {
+  socket.join(room.id);
+
+  room.players.push({
+    id:socket.id,
+    name:name.slice(0,30)
+  });
+
+  room.scores[socket.id] = 0;
+
+  socket.emit("room-joined",{
+    roomId:room.id,
+    game:room.game,
+    players:room.players,
+    maxPlayers:room.maxPlayers
+  });
+
+  io.to(room.id).emit("players-update",room.players);
+}
+
+function findRoom(id) {
+  for (const room of rooms.values()) {
+    if (room.players.some(p => p.id === id)) return room;
+  }
+  return null;
+}
+
+server.listen(process.env.PORT || 3000,() => {
+  console.log("Game server is running");
+});
